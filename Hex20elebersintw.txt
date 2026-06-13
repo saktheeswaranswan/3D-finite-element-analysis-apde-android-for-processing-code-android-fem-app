@@ -1,0 +1,401 @@
+// ==========================================
+// HEX20 FEM Solver - Full Skeleton
+// Features: 3D UI, 2D Matrix Viewer (K, B, D, J), Canonical Math Toggles
+// ==========================================
+
+// --- Application State ---
+int currentScreen = 0; // 0 = 3D View, 1 = Matrix View
+boolean showCanonical = false; 
+int matrixViewMode = 0; // 0 = K, 1 = B, 2 = D, 3 = J
+
+// --- 3D Camera Variables ---
+float rotX = 0, rotY = 0, zoom = -300;
+float panX = 0, panY = 0;
+float prevTouchDist = 0;
+
+// --- 2D Matrix View Variables ---
+float matrixPanX = 50; 
+float matrixPanY = 350; // Pushed down for 3 buttons
+
+// --- FEM Variables ---
+float[][] K = new float[60][60];
+float[][] B = new float[6][60];
+float[][] D = new float[6][6];
+float[][] J_disp = new float[3][3]; // Holds one Jacobian for display
+float[][] nodes = new float[20][3]; 
+
+// --- Button Coordinates ---
+float btnX = 30;
+float btnY_1 = 120; // Back to 3D
+float btnY_2 = 190; // Toggle Canonical
+float btnY_3 = 260; // Switch Matrix Type
+float btnW = 320;
+float btnH = 60;
+
+void setup() {
+  fullScreen(P3D);
+  orientation(LANDSCAPE);
+  smooth(8);
+  
+  populateDMatrix();
+  setupDummyNodes();
+  assembleStiffnessMatrix();
+}
+
+void draw() {
+  if (currentScreen == 0) {
+    draw3DScreen();
+  } else {
+    drawMatrixScreen();
+  }
+}
+
+// ==========================================
+// SCREEN RENDERING
+// ==========================================
+
+void draw3DScreen() {
+  background(30);
+  lights();
+  
+  pushMatrix();
+  translate(width / 2f + panX, height / 2f + panY, zoom);
+  rotateX(rotX);
+  rotateY(rotY);
+  drawAxes();
+  drawMesh();
+  popMatrix();
+  
+  camera(); 
+  hint(DISABLE_DEPTH_TEST);
+  
+  fill(255);
+  textSize(36);
+  textAlign(LEFT, TOP);
+  text("HEX20 FEM Solver", 30, 30);
+  
+  textSize(20);
+  fill(200);
+  text("1 Finger: Orbit | 2 Fingers: Pan/Zoom", 30, 80);
+  
+  drawButton("View Matrices (K, B, D, J)", btnY_1);
+  
+  hint(ENABLE_DEPTH_TEST);
+}
+
+void drawMatrixScreen() {
+  background(15, 25, 35); 
+  
+  camera();
+  hint(DISABLE_DEPTH_TEST);
+  
+  // Determine which matrix to show
+  int maxR = 60, maxC = 60;
+  float[][] currentMat = K;
+  String matTitle = "Global Stiffness Matrix K [60x60]";
+  String matEq = "K = ∫ (B^T * D * B) dV";
+  
+  if (matrixViewMode == 1) {
+    maxR = 6; maxC = 60; currentMat = B;
+    matTitle = "Strain-Displacement Matrix B [6x60]";
+    matEq = "Maps nodal displacements to element strains";
+  } else if (matrixViewMode == 2) {
+    maxR = 6; maxC = 6; currentMat = D;
+    matTitle = "Constitutive/Elasticity Matrix D [6x6]";
+    matEq = "Relates stress to strain (Hooke's Law)";
+  } else if (matrixViewMode == 3) {
+    maxR = 3; maxC = 3; currentMat = J_disp;
+    matTitle = "Jacobian Matrix J [3x3]";
+    matEq = "Maps local (ξ,η,ζ) to global (x,y,z) coordinates";
+  }
+
+  // 1. Draw the Scrollable Matrix Grid
+  pushMatrix();
+  translate(matrixPanX, matrixPanY);
+  
+  textSize(16);
+  textAlign(CENTER, CENTER);
+  
+  // Columns
+  fill(100, 200, 255);
+  for (int c = 0; c < maxC; c++) {
+    text("C" + c, c * 90 + 50, -30); 
+  }
+  
+  // Rows & Data
+  for (int r = 0; r < maxR; r++) {
+    fill(100, 200, 255);
+    text("R" + r, -40, r * 40); 
+    
+    for (int c = 0; c < maxC; c++) {
+      if (showCanonical) {
+        fill(180, 255, 180);
+        text(getCanonicalString(matrixViewMode, r, c), c * 90 + 50, r * 40);
+      } else {
+        fill(200);
+        text(nf(currentMat[r][c], 1, 3), c * 90 + 50, r * 40);
+      }
+    }
+  }
+  popMatrix();
+  
+  // 2. Draw Fixed HUD Overlay
+  fill(15, 25, 35, 240); 
+  noStroke();
+  rect(0, 0, width, 340);
+  
+  fill(255);
+  textSize(36);
+  textAlign(LEFT, TOP);
+  text(matTitle, 30, 30);
+  
+  textSize(20);
+  fill(showCanonical ? color(180, 255, 180) : color(200));
+  text(showCanonical ? "Canonical Form: " + matEq : "Numerical Form (Drag to scroll)", 30, 80);
+  
+  drawButton("Back to 3D View", btnY_1);
+  drawButton(showCanonical ? "Show Numerical Values" : "Show Expanded Math Form", btnY_2);
+  
+  String[] modeNames = {"Viewing: Stiffness (K)", "Viewing: Strain (B)", "Viewing: Elasticity (D)", "Viewing: Jacobian (J)"};
+  drawButton(modeNames[matrixViewMode] + " -> Tap to Switch", btnY_3);
+  
+  hint(ENABLE_DEPTH_TEST);
+}
+
+void drawButton(String label, float yPos) {
+  fill(70, 130, 180);
+  stroke(255);
+  strokeWeight(2);
+  rect(btnX, yPos, btnW, btnH, 10); 
+  
+  fill(255);
+  textSize(18);
+  textAlign(CENTER, CENTER);
+  text(label, btnX + btnW/2, yPos + btnH/2 - 5);
+}
+
+// ==========================================
+// CANONICAL MATH GENERATOR
+// ==========================================
+
+String getCanonicalString(int mode, int r, int c) {
+  if (mode == 0) return "K_" + r + "," + c;
+  
+  if (mode == 1) { // B-Matrix (Expanded Derivatives)
+    int node = (c / 3) + 1; // Node 1 to 20
+    int dof = c % 3;        // 0=x, 1=y, 2=z
+    
+    if (r == 0 && dof == 0) return "dN" + node + "/dx";
+    if (r == 1 && dof == 1) return "dN" + node + "/dy";
+    if (r == 2 && dof == 2) return "dN" + node + "/dz";
+    
+    if (r == 3 && dof == 0) return "dN" + node + "/dy";
+    if (r == 3 && dof == 1) return "dN" + node + "/dx";
+    
+    if (r == 4 && dof == 1) return "dN" + node + "/dz";
+    if (r == 4 && dof == 2) return "dN" + node + "/dy";
+    
+    if (r == 5 && dof == 0) return "dN" + node + "/dz";
+    if (r == 5 && dof == 2) return "dN" + node + "/dx";
+    return "0";
+  }
+  
+  if (mode == 2) { // D-Matrix (Isotropic Lamé Parameters)
+    if (r < 3 && c < 3) return (r == c) ? "L+2G" : "L"; // L = Lambda, G = Shear Mod
+    if (r >= 3 && c >= 3 && r == c) return "G";
+    return "0";
+  }
+  
+  if (mode == 3) { // J-Matrix (Expanded Jacobian)
+    String[] vars = {"x", "y", "z"};
+    String[] derivs = {"xi", "eta", "zeta"};
+    return "d" + vars[c] + "/d" + derivs[r];
+  }
+  
+  return "";
+}
+
+// ==========================================
+// ANDROID TOUCH & UI INTERACTIONS
+// ==========================================
+
+void mousePressed() {
+  if (currentScreen == 0) {
+    if (mouseX > btnX && mouseX < btnX + btnW && mouseY > btnY_1 && mouseY < btnY_1 + btnH) {
+      currentScreen = 1;
+      prevTouchDist = 0; 
+    }
+  } else {
+    if (mouseX > btnX && mouseX < btnX + btnW && mouseY > btnY_1 && mouseY < btnY_1 + btnH) {
+      currentScreen = 0;
+    } else if (mouseX > btnX && mouseX < btnX + btnW && mouseY > btnY_2 && mouseY < btnY_2 + btnH) {
+      showCanonical = !showCanonical;
+    } else if (mouseX > btnX && mouseX < btnX + btnW && mouseY > btnY_3 && mouseY < btnY_3 + btnH) {
+      matrixViewMode = (matrixViewMode + 1) % 4; // Cycle 0, 1, 2, 3
+      matrixPanX = 50; // Reset scroll on switch
+      matrixPanY = 350;
+    }
+    prevTouchDist = 0; 
+  }
+}
+
+void touchMoved() {
+  if (mouseX > btnX && mouseX < btnX + btnW) {
+    if (mouseY > btnY_1 && mouseY < btnY_1 + btnH) return;
+    if (currentScreen == 1 && mouseY > btnY_2 && mouseY < btnY_2 + btnH) return;
+    if (currentScreen == 1 && mouseY > btnY_3 && mouseY < btnY_3 + btnH) return;
+  }
+
+  if (currentScreen == 0) {
+    if (touches.length == 1) {
+      rotY += (mouseX - pmouseX) * 0.01f;
+      rotX -= (mouseY - pmouseY) * 0.01f;
+    } else if (touches.length == 2) {
+      float currentDist = dist(touches[0].x, touches[0].y, touches[1].x, touches[1].y);
+      if (prevTouchDist > 0) {
+        zoom += (currentDist - prevTouchDist) * 2.0f; 
+        panX += (mouseX - pmouseX) * 0.5f;
+        panY += (mouseY - pmouseY) * 0.5f;
+      }
+      prevTouchDist = currentDist;
+    }
+  } else {
+    if (touches.length == 1) {
+      matrixPanX += (mouseX - pmouseX);
+      matrixPanY += (mouseY - pmouseY);
+    }
+  }
+}
+
+void touchEnded() {
+  prevTouchDist = 0;
+}
+
+// ==========================================
+// FEM CORE LOGIC & MATH ENGINE
+// ==========================================
+
+void assembleStiffnessMatrix() {
+  float[] gaussPoints = {-0.774596669f, 0.0f, 0.774596669f};
+  float[] gaussWeights = {0.555555555f, 0.888888888f, 0.555555555f};
+
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      for (int k = 0; k < 3; k++) {
+        
+        float xi = gaussPoints[i];
+        float eta = gaussPoints[j];
+        float zeta = gaussPoints[k];
+        float weight = gaussWeights[i] * gaussWeights[j] * gaussWeights[k];
+
+        float[][] shapeDerivatives = calculateLocalDerivatives(xi, eta, zeta);
+        
+        // Populate the global Jacobian for display purposes
+        J_disp = calculateJacobian(shapeDerivatives);
+        float determinantJ = 1.0f; // Placeholder determinant
+        
+        buildBMatrix(shapeDerivatives); 
+
+        float[][] B_T = transposeMatrix(B);
+        float[][] D_B = multiplyMatrices(D, B);
+        float[][] B_T_D_B = multiplyMatrices(B_T, D_B);
+
+        for (int row = 0; row < 60; row++) {
+          for (int col = 0; col < 60; col++) {
+            K[row][col] += (B_T_D_B[row][col] * determinantJ * weight);
+          }
+        }
+      }
+    }
+  }
+}
+
+float[][] calculateLocalDerivatives(float xi, float eta, float zeta) {
+  float[][] dN = new float[3][20]; 
+  dN[0][0] = -0.125f * (1 - eta) * (1 - zeta) * (-2 * xi - eta - zeta - 1); 
+  dN[1][0] = -0.125f * (1 - xi) * (1 - zeta) * (-xi - 2 * eta - zeta - 1);  
+  dN[2][0] = -0.125f * (1 - xi) * (1 - eta) * (-xi - eta - 2 * zeta - 1);   
+  return dN;
+}
+
+float[][] calculateJacobian(float[][] localDerivatives) {
+  float[][] J = new float[3][3];
+  // Placeholder logic to show numerical spread in UI
+  for(int i=0; i<3; i++) {
+    for(int j=0; j<3; j++) {
+      J[i][j] = (i==j) ? random(1.0f, 2.5f) : random(-0.5f, 0.5f);
+    }
+  }
+  return J;
+}
+
+void buildBMatrix(float[][] localDerivatives) {
+  for (int i = 0; i < 6; i++) {
+    for (int j = 0; j < 60; j++) {
+      // Maps cartesian derivatives. Randomized slightly for UI visualization.
+      B[i][j] = random(-0.05f, 0.05f); 
+    }
+  }
+}
+
+float[][] multiplyMatrices(float[][] A, float[][] B) {
+  int m = A.length, n = A[0].length, p = B[0].length;
+  float[][] C = new float[m][p];
+  for (int i = 0; i < m; i++) {
+    for (int j = 0; j < p; j++) {
+      float sum = 0;
+      for (int k = 0; k < n; k++) {
+        sum += A[i][k] * B[k][j];
+      }
+      C[i][j] = sum;
+    }
+  }
+  return C;
+}
+
+float[][] transposeMatrix(float[][] matrix) {
+  int m = matrix.length, n = matrix[0].length;
+  float[][] transposed = new float[n][m];
+  for (int i = 0; i < m; i++) {
+    for (int j = 0; j < n; j++) {
+      transposed[j][i] = matrix[i][j];
+    }
+  }
+  return transposed;
+}
+
+void populateDMatrix() {
+  // Isotropic material formulation placeholder
+  float lambda = 1.1f; // Lame's first parameter
+  float G = 0.8f;      // Shear modulus
+  
+  for (int i = 0; i < 6; i++) {
+    for (int j = 0; j < 6; j++) {
+      if (i < 3 && j < 3) D[i][j] = (i == j) ? (lambda + 2*G) : lambda;
+      else if (i >= 3 && j >= 3 && i == j) D[i][j] = G;
+      else D[i][j] = 0.0f;
+    }
+  }
+}
+
+void setupDummyNodes() {
+  for(int i=0; i<20; i++) {
+    nodes[i][0] = random(-10, 10);
+    nodes[i][1] = random(-10, 10);
+    nodes[i][2] = random(-10, 10);
+  }
+}
+
+void drawAxes() {
+  strokeWeight(3);
+  stroke(255, 0, 0); line(0, 0, 0, 100, 0, 0);
+  stroke(0, 255, 0); line(0, 0, 0, 0, 100, 0);
+  stroke(0, 0, 255); line(0, 0, 0, 0, 0, 100);
+}
+
+void drawMesh() {
+  strokeWeight(1);
+  stroke(150);
+  noFill();
+  box(150);
+}
