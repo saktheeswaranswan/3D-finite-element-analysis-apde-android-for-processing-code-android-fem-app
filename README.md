@@ -3,6 +3,516 @@
 # these are elements in structural for speed , convergence,accuracy
 
 
+# FEM Constitutive (D) Matrices and Canonical Stiffness Formulation
+
+## Fundamental FEM Equation
+
+For all linear elastic finite elements:
+
+\[
+K_e = \int_{\Omega_e} B^T D B \, d\Omega
+\]
+
+or numerically,
+
+\[
+K_e =
+\sum_{g=1}^{n_g}
+B_g^T D B_g
+|J_g|
+w_g
+\]
+
+Where:
+
+| Symbol | Meaning |
+|----------|----------|
+| Ke | Element stiffness matrix |
+| B | Strain-displacement matrix |
+| D | Constitutive (material) matrix |
+| J | Jacobian |
+| w | Gauss weight |
+| Ω | Element domain |
+
+---
+
+# Important FEM Rule
+
+The **B matrix depends only on geometry and shape functions.**
+
+The **D matrix depends only on material behavior.**
+
+Therefore:
+
+\[
+B_{isotropic}
+=
+B_{orthotropic}
+=
+B_{anisotropic}
+\]
+
+for the same element geometry.
+
+Only D changes.
+
+---
+
+# Element Families
+
+## 1D Elements
+
+### Bar
+
+\[
+K_e
+=
+\int B^T D B \, dL
+\]
+
+B:
+
+\[
+B=
+\begin{bmatrix}
+-\frac1L & \frac1L
+\end{bmatrix}
+\]
+
+D:
+
+\[
+D=[E]
+\]
+
+---
+
+### Euler-Bernoulli Beam
+
+\[
+K_e
+=
+\int B^T D B \, dL
+\]
+
+B:
+
+\[
+B=
+\begin{bmatrix}
+N_1'' & N_2'' & N_3'' & N_4''
+\end{bmatrix}
+\]
+
+D:
+
+\[
+D=[EI]
+\]
+
+---
+
+# 2D Elements
+
+Applicable to:
+
+- CST
+- LST
+- Q4
+- Q8
+
+---
+
+## Isotropic Plane Stress
+
+\[
+D=
+\frac{E}{1-\nu^2}
+\begin{bmatrix}
+1 & \nu & 0\\
+\nu & 1 & 0\\
+0 & 0 & \frac{1-\nu}{2}
+\end{bmatrix}
+\]
+
+Size:
+
+\[
+3\times3
+\]
+
+Independent constants:
+
+- E
+- ν
+
+---
+
+## Isotropic Plane Strain
+
+\[
+D=
+\frac{E}{(1+\nu)(1-2\nu)}
+\begin{bmatrix}
+1-\nu & \nu & 0\\
+\nu & 1-\nu & 0\\
+0 & 0 & \frac{1-2\nu}{2}
+\end{bmatrix}
+\]
+
+Size:
+
+\[
+3\times3
+\]
+
+---
+
+## Orthotropic 2D
+
+Material constants:
+
+\[
+E_x,\;
+E_y,\;
+G_{xy},\;
+\nu_{xy}
+\]
+
+Reciprocity:
+
+\[
+\nu_{yx}
+=
+\nu_{xy}
+\frac{E_y}{E_x}
+\]
+
+Compliance matrix:
+
+\[
+S=
+\begin{bmatrix}
+1/E_x & -\nu_{yx}/E_y & 0\\
+-\nu_{xy}/E_x & 1/E_y & 0\\
+0 & 0 & 1/G_{xy}
+\end{bmatrix}
+\]
+
+Constitutive matrix:
+
+\[
+D=S^{-1}
+\]
+
+Explicit form:
+
+\[
+D=
+\frac1{1-\nu_{xy}\nu_{yx}}
+\begin{bmatrix}
+E_x & \nu_{yx}E_x & 0\\
+\nu_{xy}E_y & E_y & 0\\
+0 & 0 & G_{xy}(1-\nu_{xy}\nu_{yx})
+\end{bmatrix}
+\]
+
+Size:
+
+\[
+3\times3
+\]
+
+---
+
+# 3D Solid Elements
+
+Applicable to:
+
+- TET4
+- TET10
+- HEX8
+- HEX20
+- HEX27
+- SOLID185
+- SOLID186
+- SOLID187
+
+---
+
+## Isotropic 3D Elasticity
+
+\[
+D=
+\frac{E}
+{(1+\nu)(1-2\nu)}
+\begin{bmatrix}
+1-\nu & \nu & \nu & 0 & 0 & 0\\
+\nu & 1-\nu & \nu & 0 & 0 & 0\\
+\nu & \nu & 1-\nu & 0 & 0 & 0\\
+0 & 0 & 0 & \frac{1-2\nu}{2} & 0 & 0\\
+0 & 0 & 0 & 0 & \frac{1-2\nu}{2} & 0\\
+0 & 0 & 0 & 0 & 0 & \frac{1-2\nu}{2}
+\end{bmatrix}
+\]
+
+Size:
+
+\[
+6\times6
+\]
+
+Independent constants:
+
+- E
+- ν
+
+---
+
+## Orthotropic 3D Elasticity
+
+Material constants:
+
+\[
+E_x,E_y,E_z
+\]
+
+\[
+G_{xy},G_{yz},G_{zx}
+\]
+
+\[
+\nu_{xy},\nu_{yz},\nu_{zx}
+\]
+
+Compliance matrix:
+
+\[
+S=
+\begin{bmatrix}
+1/E_x & -\nu_{yx}/E_y & -\nu_{zx}/E_z & 0 & 0 & 0\\
+-\nu_{xy}/E_x & 1/E_y & -\nu_{zy}/E_z & 0 & 0 & 0\\
+-\nu_{xz}/E_x & -\nu_{yz}/E_y & 1/E_z & 0 & 0 & 0\\
+0 & 0 & 0 & 1/G_{yz} & 0 & 0\\
+0 & 0 & 0 & 0 & 1/G_{zx} & 0\\
+0 & 0 & 0 & 0 & 0 & 1/G_{xy}
+\end{bmatrix}
+\]
+
+\[
+D=S^{-1}
+\]
+
+Size:
+
+\[
+6\times6
+\]
+
+Independent constants:
+
+- Ex
+- Ey
+- Ez
+- Gxy
+- Gyz
+- Gzx
+- νxy
+- νyz
+- νzx
+
+Total = 9
+
+---
+
+## Transversely Isotropic
+
+Independent constants:
+
+\[
+E_1
+\]
+
+\[
+E_2=E_3
+\]
+
+\[
+\nu_{12}
+\]
+
+\[
+\nu_{23}
+\]
+
+\[
+G_{12}=G_{13}
+\]
+
+Total:
+
+5 independent constants
+
+Applications:
+
+- Carbon fiber plies
+- Geological formations
+- Fiber composites
+
+---
+
+## Fully Anisotropic Elasticity
+
+General Hooke's law:
+
+\[
+\sigma=D\varepsilon
+\]
+
+\[
+D=
+\begin{bmatrix}
+C_{11}&C_{12}&C_{13}&C_{14}&C_{15}&C_{16}\\
+C_{12}&C_{22}&C_{23}&C_{24}&C_{25}&C_{26}\\
+C_{13}&C_{23}&C_{33}&C_{34}&C_{35}&C_{36}\\
+C_{14}&C_{24}&C_{34}&C_{44}&C_{45}&C_{46}\\
+C_{15}&C_{25}&C_{35}&C_{45}&C_{55}&C_{56}\\
+C_{16}&C_{26}&C_{36}&C_{46}&C_{56}&C_{66}
+\end{bmatrix}
+\]
+
+Size:
+
+\[
+6\times6
+\]
+
+Independent constants:
+
+21
+
+---
+
+# ANSYS Element Formulations
+
+## SOLID185 (HEX8)
+
+\[
+K_e
+=
+\sum_{g=1}^{8}
+B_g^T D B_g
+|J_g|
+w_g
+\]
+
+DOF:
+
+\[
+24
+\]
+
+Matrix:
+
+\[
+24\times24
+\]
+
+---
+
+## SOLID186 (HEX20)
+
+\[
+K_e
+=
+\sum_{g=1}^{27}
+B_g^T D B_g
+|J_g|
+w_g
+\]
+
+DOF:
+
+\[
+60
+\]
+
+Matrix:
+
+\[
+60\times60
+\]
+
+Entries:
+
+\[
+3600
+\]
+
+---
+
+## SOLID187 (TET10)
+
+\[
+K_e
+=
+\int
+B^T D B
+\,dV
+\]
+
+DOF:
+
+\[
+30
+\]
+
+Matrix:
+
+\[
+30\times30
+\]
+
+---
+
+# Key Observation
+
+For every element:
+
+\[
+K_e = B^T D B
+\]
+
+The element type changes:
+
+- Shape functions
+- Jacobian
+- Integration rule
+- Matrix size
+
+The material model changes:
+
+- D matrix only
+
+Therefore:
+
+\[
+B_{HEX20}
+=
+B_{HEX20}
+\]
+
+for isotropic, orthotropic, transversely isotropic, and anisotropic materials.
+
+Only:
+
+\[
+D
+\]
+
+changes.
+
+
 
 # FEM B-Matrix and D-Matrix Reference
 
