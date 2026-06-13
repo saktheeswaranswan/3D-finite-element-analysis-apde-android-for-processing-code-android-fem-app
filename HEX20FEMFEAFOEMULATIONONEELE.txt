@@ -1,0 +1,488 @@
+// ======================================
+// HEX20 FEM ELEMENT MATRIX VIEWER & EXPORTER
+// Fully calculated B, B^T, D, J, and Ke
+// APDE / Processing Android
+// ======================================
+
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.app.Activity;
+import android.widget.Toast;
+
+boolean matrixView = false;
+boolean canonicalView = true;
+boolean isExporting = false;
+
+// 0: J, 1: D, 2: B, 3: Bt, 4: Ke
+int currentMatIndex = 4; 
+String[] matNames = {"J (3x3)", "D (6x6)", "B (6x60)", "B^T (60x6)", "Ke (60x60)"};
+
+float rotX = 0, rotY = 0;
+float scrollX = 0, scrollY = 0; // For panning large matrices
+
+// Physical properties
+float E = 200e9f; // Young's Modulus (Pa)
+float nu = 0.3f;  // Poisson's Ratio
+
+float[][] node = new float[20][3];
+int[][] natCoords = new int[20][3]; // Natural coordinates (xi, eta, zeta)
+
+// Matrices to view
+float[][] J_mat = new float[3][3];
+float[][] D_mat = new float[6][6];
+float[][] B_mat = new float[6][60];
+float[][] Bt_mat= new float[60][6];
+float[][] Ke_mat= new float[60][60];
+
+void setup() {
+  fullScreen(P3D);
+  initNaturalCoordinates();
+  generateValidElement();
+  computeFEM();
+}
+
+void draw() {
+  if (!matrixView) {
+    draw3DView();
+  } else {
+    drawMatrixView();
+  }
+}
+
+// ----------------------------------------------------
+// 3D VIEW
+// ----------------------------------------------------
+void draw3DView() {
+  background(20);
+  lights();
+  
+  pushMatrix();
+  translate(width/2, height/2, -400);
+  rotateX(rotX);
+  rotateY(rotY);
+  
+  stroke(150);
+  strokeWeight(1);
+  // Draw bounding reference box
+  noFill();
+  box(200);
+
+  // Draw Nodes
+  for (int i = 0; i < 20; i++) {
+    pushMatrix(); 
+    translate(node[i][0], node[i][1], node[i][2]); 
+    noStroke();
+    
+    if(i < 8) {
+      fill(255, 50, 50); // Corners red
+      sphere(6); 
+      
+      // --- WRITE COORDINATES FOR RED POINTS ---
+      fill(255); 
+      textSize(16);
+      textAlign(LEFT, CENTER);
+      // Formatting the coordinates to 1 decimal place for readability
+      String coords = String.format("(%.1f, %.1f, %.1f)", node[i][0], node[i][1], node[i][2]);
+      text(coords, 12, -12); // Offset slightly from the sphere
+      
+    } else {
+      fill(50, 150, 255); // Mids blue
+      sphere(6); 
+    }
+    
+    popMatrix();
+  }
+  popMatrix();
+
+  // Next Button
+  fill(100, 200, 255);
+  rect(20, 20, 220, 60, 10);
+  fill(0);
+  textSize(24);
+  textAlign(CENTER, CENTER);
+  text("VIEW MATRICES", 130, 50);
+  
+  textAlign(LEFT, TOP);
+  fill(255);
+  text("Drag to rotate 3D element", 20, 100);
+}
+
+// ----------------------------------------------------
+// MATRIX VIEW
+// ----------------------------------------------------
+void drawMatrixView() {
+  background(10);
+  
+  // Matrix viewport
+  pushMatrix();
+  translate(scrollX, scrollY);
+  
+  int rows = getRowCount(currentMatIndex);
+  int cols = getColCount(currentMatIndex);
+  float cellW = canonicalView ? 90 : 120;
+  float cellH = 40;
+  
+  textSize(16);
+  textAlign(CENTER, CENTER);
+  
+  // Only draw cells within screen bounds for performance
+  for (int r = 0; r < rows; r++) {
+    float y = 150 + r * cellH;
+    if(y + scrollY < 100 || y + scrollY > height) continue;
+    
+    for (int c = 0; c < cols; c++) {
+      float x = 20 + c * cellW;
+      if(x + scrollX < -50 || x + scrollX > width) continue;
+      
+      fill(30);
+      stroke(100);
+      rect(x, y, cellW, cellH);
+      
+      fill(255);
+      if (canonicalView) {
+        text(getMatPrefix(currentMatIndex) + r + "," + c, x + cellW/2, y + cellH/2);
+      } else {
+        text(nf(getMatValue(currentMatIndex, r, c), 1, 3), x + cellW/2, y + cellH/2);
+      }
+    }
+  }
+  popMatrix();
+  
+  // Top UI Bar (Fixed)
+  noStroke();
+  fill(15);
+  rect(0, 0, width, 120);
+  
+  fill(255);
+  textSize(28);
+  textAlign(LEFT, TOP);
+  text("HEX20: " + matNames[currentMatIndex], 20, 20);
+  
+  textSize(14);
+  text("Drag to pan matrices", 20, 60);
+
+  // Buttons
+  drawButton(20, height - 90, 130, 60, "BACK", color(255, 100, 100));
+  drawButton(160, height - 90, 150, 60, "NUM/SYM", color(100, 255, 100));
+  drawButton(320, height - 90, 150, 60, "PREV MAT", color(200));
+  drawButton(480, height - 90, 150, 60, "NEXT MAT", color(200));
+  drawButton(640, height - 90, 160, 60, "EXPORT PY", color(255, 200, 50));
+}
+
+void drawButton(float x, float y, float w, float h, String label, int c) {
+  fill(c);
+  stroke(0);
+  rect(x, y, w, h, 8);
+  fill(0);
+  textAlign(CENTER, CENTER);
+  textSize(20);
+  text(label, x + w/2, y + h/2);
+}
+
+// ----------------------------------------------------
+// INTERACTIONS
+// ----------------------------------------------------
+void mousePressed() {
+  if (!matrixView) {
+    if (mouseX > 20 && mouseX < 240 && mouseY > 20 && mouseY < 80) {
+      matrixView = true;
+      scrollX = 0; scrollY = 0;
+    }
+  } else {
+    // Back
+    if (mouseX > 20 && mouseX < 150 && mouseY > height - 90 && mouseY < height - 30) {
+      matrixView = false;
+    }
+    // Toggle Num/Sym
+    else if (mouseX > 160 && mouseX < 310 && mouseY > height - 90 && mouseY < height - 30) {
+      canonicalView = !canonicalView;
+    }
+    // Prev Mat
+    else if (mouseX > 320 && mouseX < 470 && mouseY > height - 90 && mouseY < height - 30) {
+      currentMatIndex = (currentMatIndex - 1 + 5) % 5;
+      scrollX = 0; scrollY = 0;
+    }
+    // Next Mat
+    else if (mouseX > 480 && mouseX < 630 && mouseY > height - 90 && mouseY < height - 30) {
+      currentMatIndex = (currentMatIndex + 1) % 5;
+      scrollX = 0; scrollY = 0;
+    }
+    // Export Python
+    else if (mouseX > 640 && mouseX < 800 && mouseY > height - 90 && mouseY < height - 30) {
+      exportElementPython();
+    }
+  }
+}
+
+void mouseDragged() {
+  if (!matrixView) {
+    rotY += (mouseX - pmouseX) * 0.01;
+    rotX -= (mouseY - pmouseY) * 0.01;
+  } else {
+    scrollX += (mouseX - pmouseX);
+    scrollY += (mouseY - pmouseY);
+  }
+}
+
+// ----------------------------------------------------
+// PYTHON EXPORT & CLIPBOARD (ANDROID APDE)
+// ----------------------------------------------------
+void exportElementPython() {
+  if(isExporting) return;
+  isExporting = true;
+  
+  StringBuilder sb = new StringBuilder();
+  sb.append("import numpy as np\n");
+  sb.append("\n# Element Stiffness Matrix (60x60)\n");
+  sb.append("Ke = np.array([\n");
+  
+  for(int r = 0; r < 60; r++) {
+    sb.append("  [");
+    for(int c = 0; c < 60; c++) {
+      // Use US Locale to ensure period decimal separators
+      sb.append(String.format(java.util.Locale.US, "%.6e", Ke_mat[r][c])).append((c < 59) ? ", " : "");
+    }
+    sb.append("]").append((r < 59) ? ",\n" : "\n");
+  }
+  sb.append("])\n");
+  
+  sb.append("\n# Corresponding Global DOF Indices (Local mapping for viewer element)\n");
+  sb.append("DOFs = [");
+  for(int i = 0; i < 60; i++) sb.append(i).append((i < 59 ? ", " : ""));
+  sb.append("]\n");
+  
+  String finalCode = sb.toString();
+  println(finalCode); // Backup to console
+  copyToClipboard(finalCode);
+  
+  isExporting = false;
+}
+
+void copyToClipboard(final String text) {
+  final Activity activity = this.getActivity();
+  if (activity != null) {
+    activity.runOnUiThread(new Runnable() {
+      public void run() {
+        ClipboardManager clipboard = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+        ClipData clip = ClipData.newPlainText("FEM Python Code", text);
+        clipboard.setPrimaryClip(clip);
+        Toast.makeText(activity, "Python Code Copied to Clipboard!", Toast.LENGTH_SHORT).show();
+      }
+    });
+  }
+}
+
+// ----------------------------------------------------
+// FEM MATH & GENERATION
+// ----------------------------------------------------
+void initNaturalCoordinates() {
+  // 8 Corners
+  int[][] corners = {{-1,-1,-1}, {1,-1,-1}, {1,1,-1}, {-1,1,-1}, {-1,-1,1}, {1,-1,1}, {1,1,1}, {-1,1,1}};
+  for(int i=0; i<8; i++) natCoords[i] = corners[i];
+  
+  // 12 Mid-edges
+  int[][] mids = {{0,-1,-1}, {1,0,-1}, {0,1,-1}, {-1,0,-1}, {0,-1,1}, {1,0,1}, {0,1,1}, {-1,0,1}, {-1,-1,0}, {1,-1,0}, {1,1,0}, {-1,1,0}};
+  for(int i=0; i<12; i++) natCoords[i+8] = mids[i];
+}
+
+void generateValidElement() {
+  // Generates a valid but slightly distorted brick (size ~ 100)
+  for (int i = 0; i < 20; i++) {
+    float rx = natCoords[i][0] * 100 + random(-10, 10);
+    float ry = natCoords[i][1] * 100 + random(-10, 10);
+    float rz = natCoords[i][2] * 100 + random(-10, 10);
+    node[i][0] = rx;
+    node[i][1] = ry;
+    node[i][2] = rz;
+  }
+}
+
+void computeFEM() {
+  // 1. Compute Material Matrix D
+  float c = E / ((1 + nu) * (1 - 2 * nu));
+  D_mat[0][0] = c*(1-nu); D_mat[0][1] = c*nu;     D_mat[0][2] = c*nu;
+  D_mat[1][0] = c*nu;     D_mat[1][1] = c*(1-nu); D_mat[1][2] = c*nu;
+  D_mat[2][0] = c*nu;     D_mat[2][1] = c*nu;     D_mat[2][2] = c*(1-nu);
+  D_mat[3][3] = c*(1-2*nu)/2;
+  D_mat[4][4] = c*(1-2*nu)/2;
+  D_mat[5][5] = c*(1-2*nu)/2;
+
+  // Initialize Ke
+  for(int i=0; i<60; i++) for(int j=0; j<60; j++) Ke_mat[i][j] = 0;
+
+  // 2x2x2 Gauss Quadrature for Ke
+  float[] gp = {-0.577350269f, 0.577350269f}; 
+  float weight = 1.0f;
+
+  for (int i = 0; i < 2; i++) {
+    for (int j = 0; j < 2; j++) {
+      for (int k = 0; k < 2; k++) {
+        float xi = gp[i], eta = gp[j], zeta = gp[k];
+        integrateGaussPoint(xi, eta, zeta, weight);
+      }
+    }
+  }
+  
+  // Extract B, Bt, and J at the center (0,0,0) specifically for the viewer
+  computeDisplayMatrices(); 
+}
+
+void integrateGaussPoint(float xi, float eta, float zeta, float w) {
+  float[][] dN = getShapeDerivatives(xi, eta, zeta);
+  float[][] jacobian = new float[3][3];
+  
+  // J = dN * coordinates
+  for (int i=0; i<3; i++) {
+    for (int j=0; j<3; j++) {
+      float sum = 0;
+      for (int n=0; n<20; n++) sum += dN[n][i] * node[n][j];
+      jacobian[i][j] = sum;
+    }
+  }
+  
+  float detJ = getDeterminant(jacobian);
+  float[][] invJ = getInverse(jacobian, detJ);
+  
+  // Global derivatives: dN/dx, dN/dy, dN/dz
+  float[][] dNdx = new float[20][3];
+  for(int n=0; n<20; n++) {
+    for(int i=0; i<3; i++) {
+      dNdx[n][i] = invJ[i][0]*dN[n][0] + invJ[i][1]*dN[n][1] + invJ[i][2]*dN[n][2];
+    }
+  }
+  
+  // Assemble temporary B matrix for this integration point
+  float[][] B_tmp = new float[6][60];
+  for(int n=0; n<20; n++) {
+    B_tmp[0][n*3]   = dNdx[n][0];
+    B_tmp[1][n*3+1] = dNdx[n][1];
+    B_tmp[2][n*3+2] = dNdx[n][2];
+    
+    B_tmp[3][n*3]   = dNdx[n][1]; B_tmp[3][n*3+1] = dNdx[n][0];
+    B_tmp[4][n*3+1] = dNdx[n][2]; B_tmp[4][n*3+2] = dNdx[n][1];
+    B_tmp[5][n*3]   = dNdx[n][2]; B_tmp[5][n*3+2] = dNdx[n][0];
+  }
+  
+  // Ke = Ke + B^T * D * B * detJ * w^3
+  for (int r = 0; r < 60; r++) {
+    for (int c = 0; c < 60; c++) {
+      float sum = 0;
+      for (int m = 0; m < 6; m++) {
+        for (int p = 0; p < 6; p++) {
+           sum += B_tmp[m][r] * D_mat[m][p] * B_tmp[p][c];
+        }
+      }
+      Ke_mat[r][c] += sum * detJ * (w*w*w);
+    }
+  }
+}
+
+void computeDisplayMatrices() {
+  // Evaluates B, Bt, and J at origin (0,0,0) just for UI display
+  float[][] dN = getShapeDerivatives(0, 0, 0);
+  for (int i=0; i<3; i++) {
+    for (int j=0; j<3; j++) {
+      float sum = 0;
+      for (int n=0; n<20; n++) sum += dN[n][i] * node[n][j];
+      J_mat[i][j] = sum;
+    }
+  }
+  
+  float detJ = getDeterminant(J_mat);
+  float[][] invJ = getInverse(J_mat, detJ);
+  
+  float[][] dNdx = new float[20][3];
+  for(int n=0; n<20; n++) {
+    for(int i=0; i<3; i++) {
+      dNdx[n][i] = invJ[i][0]*dN[n][0] + invJ[i][1]*dN[n][1] + invJ[i][2]*dN[n][2];
+    }
+  }
+  
+  for(int n=0; n<20; n++) {
+    B_mat[0][n*3]   = dNdx[n][0];
+    B_mat[1][n*3+1] = dNdx[n][1];
+    B_mat[2][n*3+2] = dNdx[n][2];
+    B_mat[3][n*3]   = dNdx[n][1]; B_mat[3][n*3+1] = dNdx[n][0];
+    B_mat[4][n*3+1] = dNdx[n][2]; B_mat[4][n*3+2] = dNdx[n][1];
+    B_mat[5][n*3]   = dNdx[n][2]; B_mat[5][n*3+2] = dNdx[n][0];
+  }
+  
+  for(int r=0; r<6; r++) {
+    for(int c=0; c<60; c++) {
+      Bt_mat[c][r] = B_mat[r][c];
+    }
+  }
+}
+
+float[][] getShapeDerivatives(float r, float s, float t) {
+  float[][] dN = new float[20][3]; // dN/dr, dN/ds, dN/dt
+  
+  for (int i = 0; i < 20; i++) {
+    float ri = natCoords[i][0], si = natCoords[i][1], ti = natCoords[i][2];
+    
+    if (abs(ri)==1 && abs(si)==1 && abs(ti)==1) { // Corners
+      dN[i][0] = 0.125f * ri * (1+s*si) * (1+t*ti) * (2*r*ri + s*si + t*ti - 1);
+      dN[i][1] = 0.125f * si * (1+r*ri) * (1+t*ti) * (r*ri + 2*s*si + t*ti - 1);
+      dN[i][2] = 0.125f * ti * (1+r*ri) * (1+s*si) * (r*ri + s*si + 2*t*ti - 1);
+    } else if (ri==0) { // Mid edges along r
+      dN[i][0] = -0.5f * r * (1+s*si) * (1+t*ti);
+      dN[i][1] = 0.25f * si * (1-r*r) * (1+t*ti);
+      dN[i][2] = 0.25f * ti * (1-r*r) * (1+s*si);
+    } else if (si==0) { // Mid edges along s
+      dN[i][0] = 0.25f * ri * (1-s*s) * (1+t*ti);
+      dN[i][1] = -0.5f * s * (1+r*ri) * (1+t*ti);
+      dN[i][2] = 0.25f * ti * (1+r*ri) * (1-s*s);
+    } else if (ti==0) { // Mid edges along t
+      dN[i][0] = 0.25f * ri * (1+s*si) * (1-t*t);
+      dN[i][1] = 0.25f * si * (1+r*ri) * (1-t*t);
+      dN[i][2] = -0.5f * t * (1+r*ri) * (1+s*si);
+    }
+  }
+  return dN;
+}
+
+float getDeterminant(float[][] m) {
+  return m[0][0]*(m[1][1]*m[2][2]-m[1][2]*m[2][1]) 
+       - m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0]) 
+       + m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]);
+}
+
+float[][] getInverse(float[][] m, float det) {
+  float[][] inv = new float[3][3];
+  float invDet = 1.0f / det;
+  inv[0][0] = (m[1][1]*m[2][2] - m[2][1]*m[1][2]) * invDet;
+  inv[0][1] = (m[0][2]*m[2][1] - m[0][1]*m[2][2]) * invDet;
+  inv[0][2] = (m[0][1]*m[1][2] - m[0][2]*m[1][1]) * invDet;
+  inv[1][0] = (m[1][2]*m[2][0] - m[1][0]*m[2][2]) * invDet;
+  inv[1][1] = (m[0][0]*m[2][2] - m[0][2]*m[2][0]) * invDet;
+  inv[1][2] = (m[1][0]*m[0][2] - m[0][0]*m[1][2]) * invDet;
+  inv[2][0] = (m[1][0]*m[2][1] - m[2][0]*m[1][1]) * invDet;
+  inv[2][1] = (m[2][0]*m[0][1] - m[0][0]*m[2][1]) * invDet;
+  inv[2][2] = (m[0][0]*m[1][1] - m[1][0]*m[0][1]) * invDet;
+  return inv;
+}
+
+// ----------------------------------------------------
+// HELPERS
+// ----------------------------------------------------
+int getRowCount(int idx) {
+  if(idx==0) return 3; if(idx==1) return 6; if(idx==2) return 6; 
+  if(idx==3) return 60; return 60;
+}
+
+int getColCount(int idx) {
+  if(idx==0) return 3; if(idx==1) return 6; if(idx==2) return 60; 
+  if(idx==3) return 6; return 60;
+}
+
+String getMatPrefix(int idx) {
+  if(idx==0) return "J_"; if(idx==1) return "D_"; if(idx==2) return "B_"; 
+  if(idx==3) return "BT_"; return "K_";
+}
+
+float getMatValue(int idx, int r, int c) {
+  if(idx==0) return J_mat[r][c]; if(idx==1) return D_mat[r][c];
+  if(idx==2) return B_mat[r][c]; if(idx==3) return Bt_mat[r][c];
+  return Ke_mat[r][c];
+}
