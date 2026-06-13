@@ -956,6 +956,179 @@ CFD
 
 For understanding the actual numerical assembly of , , convection, diffusion, Maxwell curl-curl, and Navier–Stokes matrices, scikit-fem and SfePy are usually the easiest because the entire element formulation can often be understood from a few hundred lines of Python rather than thousands of lines of C++.
 
+If you're looking for GitHub repositories that contain complete self-contained FEM codes (shape functions, Jacobian, B-matrix, Gauss integration, assembly, solver, post-processing) similar to the HEX20 code you posted, these are among the best:
+
+General FEM Libraries
+
+[MFEM](https://mfem.org?utm_source=chatgpt.com)
+
+HEX8, HEX20, HEX27
+
+TET4, TET10
+
+WEDGE, PYRAMID
+
+H1, H(curl), H(div) elements
+
+Thermal, structural, electromagnetics
+
+
+[deal.II](https://www.dealii.org?utm_source=chatgpt.com)
+
+Complete finite element implementations
+
+High-order elements
+
+Adaptive meshing
+
+
+[libMesh](https://libmesh.github.io?utm_source=chatgpt.com)
+
+Structural
+
+Thermal
+
+CFD
+
+
+[FEniCS Project](https://fenicsproject.org?utm_source=chatgpt.com)
+
+Variational formulation based
+
+Widely used in research
+
+
+
+
+---
+
+Pure Python FEM Repositories
+
+[SfePy](https://sfepy.org?utm_source=chatgpt.com)
+
+Probably the closest to what you want
+
+Python + NumPy + SciPy
+
+Thermal
+
+Structural
+
+Piezoelectric
+
+Electromagnetics
+
+
+[PyNiteFEA](https://github.com/JWock82/Pynite?utm_source=chatgpt.com)
+
+Beam
+
+Frame
+
+Plate
+
+Truss
+
+
+[scikit-fem](https://github.com/kinnala/scikit-fem?utm_source=chatgpt.com)
+
+Educational FEM code
+
+Easy to read element implementations
+
+
+
+
+---
+
+Repositories with Explicit Element Formulations
+
+For actual element-by-element source code:
+
+[FEM.edu](https://github.com/pmackenz/FEM.edu?utm_source=chatgpt.com)
+
+Educational implementation
+
+Shape functions shown explicitly
+
+
+[SolidSpy](https://github.com/AppliedMechanics-EAFIT/SolidsPy?utm_source=chatgpt.com)
+
+Plane stress
+
+Plane strain
+
+Explicit element matrices
+
+
+[CALFEM Python](https://github.com/CALFEM/calfem-python?utm_source=chatgpt.com)
+
+Bar
+
+Beam
+
+Frame
+
+Quad
+
+Triangle
+
+
+
+
+---
+
+CFD Equivalent
+
+For CFD element assembly:
+
+[OpenFOAM](https://www.openfoam.com?utm_source=chatgpt.com)
+
+[SU2](https://su2code.github.io?utm_source=chatgpt.com)
+
+[FiPy](https://www.ctcms.nist.gov/fipy/?utm_source=chatgpt.com)
+
+
+
+---
+
+Electromagnetics
+
+[GetDP](https://getdp.info?utm_source=chatgpt.com)
+
+[Elmer FEM](https://www.elmerfem.org?utm_source=chatgpt.com)
+
+[MFEM](https://mfem.org?utm_source=chatgpt.com)
+
+
+
+---
+
+Best Repositories for Individual Elements
+
+Element	Repository
+
+T3 Triangle	SolidSpy
+T6 Triangle	scikit-fem
+Q4 Quad	CALFEM
+Q8 Quad	MFEM
+TET4	MFEM
+TET10	deal.II
+HEX8	MFEM
+HEX20	MFEM
+HEX27	deal.II
+WEDGE6	libMesh
+WEDGE15	MFEM
+PYRAMID5	MFEM
+PYRAMID13	deal.II
+Beam	PyNite
+Frame	PyNite
+Plate	CALFEM
+Shell	MFEM
+
+
+For a repository that actually resembles your script style (NumPy + SciPy + explicit shape functions + explicit assembly), SfePy, SolidSpy, CALFEM, and scikit-fem are the closest matches. Their source code is much easier to study than large C++ frameworks like MFEM or deal.II.
+
 
 
 
