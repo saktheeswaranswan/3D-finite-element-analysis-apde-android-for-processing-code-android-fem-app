@@ -1,0 +1,764 @@
+// EXACT MATHEMATICAL FEA SOLVER FOR APDE (Processing Android)
+// Implements 20-node Hex, 2x2x2 Gaussian Integration, Jacobian inversions, and a CG Solver
+// ENHANCED WITH: Element Matrix Viewer, Matrix Pagination, Global Sparsity Assembly Animation, Force Vector, and Element Slider
+
+int nx = 3, ny = 3, nz = 3; 
+double xmin = 0, xmax = 5;
+double ymin = 0, ymax = 0.2;
+double zmin = 0, zmax = 0.3;
+
+double P = -100;
+double E = 2e9;
+double nu = 0.3;
+float warp_factor = 50;
+
+ArrayList<Node> nodes = new ArrayList<Node>();
+ArrayList<int[]> elements = new ArrayList<int[]>();
+
+double[][] C;
+double[][] Kg;
+double[] F;
+double[] U;
+
+float minDisp = 0, maxDisp = 0;
+float minStress = 0, maxStress = 0;
+float rotX = -0.5, rotY = 0.5;
+boolean showStress = true;
+Node selectedNode = null;
+boolean solved = false;
+
+// --- NEW UI & MATRIX VIEWER VARIABLES ---
+int viewMode = 0; // 0 = 3D Beam, 1 = Element Matrix, 2 = Global Assembly
+int currentElement = 0;
+int matScrollX = 0, matScrollY = 0; // Pagination for the 60x60 matrix
+
+class ElementData {
+  int[] nodes;
+  int[] dofs;
+  double[][] Kel;
+}
+ArrayList<ElementData> elementDataList = new ArrayList<ElementData>();
+
+void setup() {
+  size(displayWidth, displayHeight, P3D);
+  orientation(LANDSCAPE);
+  thread("runFEA"); // Run heavy math in background
+}
+
+void draw() {
+  background(30);
+  
+  if (!solved) {
+    fill(255); textSize(40); textAlign(CENTER, CENTER);
+    text("Assembling Matrices and Solving Ku = F...\nPlease wait.", width/2, height/2);
+    return;
+  }
+  
+  drawTabs();
+  
+  if (viewMode == 0) {
+    draw3DBeam(width/2, height/2, width/8.0, false);
+    drawScale();
+    drawInstructions();
+  } else if (viewMode == 1) {
+    drawElementMatrixViewer();
+    drawSlider();
+  } else if (viewMode == 2) {
+    drawGlobalAssemblyAnimation();
+    drawSlider();
+  }
+}
+
+// --- UI EVENT HANDLING ---
+void mousePressed() {
+  if (!solved) return;
+  checkSliderInteraction();
+}
+
+void mouseDragged() { 
+  if (!solved) return;
+  
+  if ((viewMode == 1 || viewMode == 2) && mouseY > height - 100) {
+    checkSliderInteraction();
+    return; // Don't rotate if interacting with slider
+  }
+  
+  if (viewMode == 0 || viewMode == 1) {
+    rotY += (mouseX - pmouseX) * 0.01; 
+    rotX -= (mouseY - pmouseY) * 0.01; 
+  }
+}
+
+void mouseReleased() {
+  if (!solved) return;
+  
+  // Tab Handling
+  if (mouseY < 60) {
+    float tabW = width / 3.0;
+    if (mouseX < tabW) viewMode = 0;
+    else if (mouseX < tabW * 2) viewMode = 1;
+    else viewMode = 2;
+    return;
+  }
+  
+  // Element Matrix Viewer Controls (D-Pad scrolling only)
+  if (viewMode == 1) {
+    if (mouseX > width/2 && mouseY > height - 180 && mouseY < height - 60) {
+      if (mouseX > width - 250 && mouseX < width - 170) matScrollX = max(0, matScrollX - 5); // Left
+      if (mouseX > width - 80 && mouseX < width) matScrollX = min(55, matScrollX + 5); // Right
+      if (mouseX > width - 160 && mouseX < width - 90 && mouseY < height - 120) matScrollY = max(0, matScrollY - 5); // Up
+      if (mouseX > width - 160 && mouseX < width - 90 && mouseY > height - 120) matScrollY = min(55, matScrollY + 5); // Down
+    }
+  }
+  
+  // Stress Toggle in Main View
+  if (viewMode == 0 && mouseX < 400 && mouseY > 140 && mouseY < 200) {
+    showStress = !showStress;
+  }
+}
+
+void checkSliderInteraction() {
+  if (elementDataList.size() <= 1) return;
+  float sliderW = width * 0.6f;
+  float sliderH = 40;
+  float sliderX = width / 2.0f - sliderW / 2.0f;
+  float sliderY = height - 60;
+  
+  // Expanding hit-box for easier touch interaction
+  if (mouseX >= sliderX - 40 && mouseX <= sliderX + sliderW + 40 && mouseY >= sliderY - 40 && mouseY <= sliderY + sliderH + 40) {
+    currentElement = (int) map(mouseX, sliderX, sliderX + sliderW, 0, elementDataList.size() - 1);
+    currentElement = constrain(currentElement, 0, elementDataList.size() - 1);
+  }
+}
+
+// --- DRAWING FUNCTIONS ---
+
+void drawTabs() {
+  hint(DISABLE_DEPTH_TEST); camera(); noLights();
+  float tabW = width / 3.0;
+  textSize(24); textAlign(CENTER, CENTER);
+  
+  fill(viewMode == 0 ? 100 : 50); rect(0, 0, tabW, 60); fill(255); text("3D BEAM", tabW/2, 30);
+  fill(viewMode == 1 ? 100 : 50); rect(tabW, 0, tabW, 60); fill(255); text("ELEMENT K", tabW + tabW/2, 30);
+  fill(viewMode == 2 ? 100 : 50); rect(tabW*2, 0, tabW, 60); fill(255); text("GLOBAL K", tabW*2 + tabW/2, 30);
+}
+
+void drawSlider() {
+  if (elementDataList.size() <= 1) return;
+  float sliderW = width * 0.6f;
+  float sliderH = 20;
+  float sliderX = width / 2.0f - sliderW / 2.0f;
+  float sliderY = height - 50;
+  
+  // Track
+  fill(60); noStroke();
+  rect(sliderX, sliderY, sliderW, sliderH, 10);
+  
+  // Fill
+  float handleX = map(currentElement, 0, elementDataList.size() - 1, sliderX, sliderX + sliderW);
+  fill(100, 150, 255);
+  rect(sliderX, sliderY, handleX - sliderX, sliderH, 10, 0, 0, 10);
+  
+  // Handle
+  fill(255);
+  rect(handleX - 15, sliderY - 10, 30, sliderH + 20, 8);
+  
+  // Text
+  fill(255); textSize(18); textAlign(CENTER, BOTTOM);
+  text("Slide to select Element ID: " + currentElement + " (Max: " + (elementDataList.size()-1) + ")", width/2.0f, sliderY - 10);
+}
+
+void drawElementMatrixViewer() {
+  // Left Side: Mini 3D Beam with blinking active element
+  draw3DBeam(width * 0.25f, height/2 - 20, width/10.0, true);
+  
+  hint(DISABLE_DEPTH_TEST); camera(); noLights();
+  
+  // Right Side: Matrix UI Background
+  fill(20); rect(width/2, 60, width/2, height - 60);
+  
+  fill(255); textSize(28); textAlign(LEFT, TOP);
+  text("Element Matrix (" + currentElement + ")", width/2 + 20, 80);
+  
+  // Scroll Controls (D-Pad) fitted to screen
+  fill(100); 
+  rect(width - 160, height - 180, 70, 50, 5); fill(255); textAlign(CENTER, CENTER); text("UP", width - 125, height - 155);
+  fill(100); rect(width - 160, height - 120, 70, 50, 5); fill(255); text("DN", width - 125, height - 95);
+  fill(100); rect(width - 240, height - 120, 70, 50, 5); fill(255); text("LF", width - 205, height - 95);
+  fill(100); rect(width - 80, height - 120, 70, 50, 5); fill(255); text("RT", width - 45, height - 95);
+  
+  // Draw Numeric Matrix Block (Viewport dynamically calculated to fit screen)
+  ElementData elData = elementDataList.get(currentElement);
+  double[][] Kel = elData.Kel;
+  
+  float startX = width/2 + 30;
+  float startY = 140;
+  int colsToShow = max(1, (int)((width/2 - 50) / 80)); // 80px per cell width
+  int rowsToShow = max(1, (int)((height - 350) / 30)); // 30px per cell height
+  float cellW = (width/2 - 60) / colsToShow;
+  float cellH = min(35, (height - 350) / (float)rowsToShow);
+  
+  textSize(14);
+  for (int r = 0; r < rowsToShow; r++) {
+    for (int c = 0; c < colsToShow; c++) {
+      int actualR = r + matScrollY;
+      int actualC = c + matScrollX;
+      
+      if (actualR < 60 && actualC < 60) {
+        float val = (float)Kel[actualR][actualC];
+        fill(val == 0 ? 80 : 255); // Dim zeros
+        textAlign(CENTER, CENTER);
+        text(String.format("%+.2e", val), startX + c * cellW + cellW/2, startY + r * cellH + cellH/2);
+      }
+    }
+  }
+  
+  // Headers indicating DOF index
+  fill(150); textSize(12);
+  for(int c=0; c<colsToShow; c++) if (c+matScrollX < 60) text("C" + (c+matScrollX), startX + c * cellW + cellW/2, startY - 15);
+  for(int r=0; r<rowsToShow; r++) if (r+matScrollY < 60) text("R" + (r+matScrollY), startX - 25, startY + r * cellH + cellH/2);
+}
+
+void drawGlobalAssemblyAnimation() {
+  hint(DISABLE_DEPTH_TEST); camera(); noLights();
+  
+  fill(255); textSize(28); textAlign(CENTER, TOP);
+  text("Global Stiffness (Kg) & Force Vector (F)", width/2, 70);
+  
+  textSize(20); fill(200, 200, 0);
+  text("Viewing Assembly for Element " + currentElement, width/2, 105);
+  
+  int totalDofs = Kg.length;
+  // Fit matrices properly above the slider
+  float mapSize = min(width/2.2f, height - 280); 
+  float startX = width/2 - mapSize/2 - 60; // Shift left to make room for F vector
+  float startY = 145;
+  float cellS = max(1.0f, mapSize / (float)totalDofs);
+  
+  // Draw base Kg matrix structure with sparsity coloring
+  noStroke();
+  for (int r = 0; r < totalDofs; r++) {
+    for (int c = 0; c < totalDofs; c++) {
+      if (Kg[r][c] != 0) {
+        if (Kg[r][c] > 0) fill(50, 150, 255); // Blue for positive stiffness
+        else fill(255, 150, 50);              // Orange for negative stiffness
+        rect(startX + c*cellS, startY + r*cellS, cellS > 1 ? cellS : 1, cellS > 1 ? cellS : 1);
+      }
+    }
+  }
+  
+  // Draw Force Vector (F)
+  float fStartX = startX + mapSize + 40;
+  float fW = max(15.0f, mapSize / 15.0f);
+  for (int r = 0; r < totalDofs; r++) {
+    if (F[r] != 0) fill(50, 255, 50); // Green for active force boundaries
+    else fill(80);                    // Dim gray for zero force
+    rect(fStartX, startY + r*cellS, fW, cellS > 1 ? cellS : 1);
+  }
+  
+  // Highlight active element's contributions across both matrices
+  ElementData elData = elementDataList.get(currentElement);
+  int[] dofs = elData.dofs;
+  
+  fill(255, 50, 50, 200); // Red highlight with alpha
+  for (int i = 0; i < dofs.length; i++) {
+    int r = dofs[i];
+    
+    // Highlight Force Vector
+    rect(fStartX, startY + r*cellS, fW, cellS > 1 ? cellS : 2);
+    
+    // Highlight Global Matrix
+    for (int j = 0; j < dofs.length; j++) {
+      int c = dofs[j];
+      rect(startX + c*cellS, startY + r*cellS, cellS > 1 ? cellS : 2, cellS > 1 ? cellS : 2);
+    }
+  }
+  
+  // Axis Labels
+  fill(255); textSize(16); textAlign(CENTER, BOTTOM);
+  text("Kg Matrix", startX + mapSize/2, startY - 10);
+  text("F Vector", fStartX + fW/2, startY - 10);
+}
+
+void draw3DBeam(float tx, float ty, float tScale, boolean highlightMode) {
+  hint(ENABLE_DEPTH_TEST);
+  pushMatrix();
+  translate(tx, ty, -200);
+  scale(tScale);
+  rotateX(rotX); rotateY(rotY);
+  translate((float)-(xmax-xmin)/2, (float)-(ymax-ymin)/2, (float)-(zmax-zmin)/2);
+  
+  strokeWeight(0.5); stroke(0, 50);
+  selectedNode = null;
+  float closestDist = 100;
+  
+  float blink = (sin(millis() / 150.0f) + 1.0f) / 2.0f; // 0.0 to 1.0 mapping for pulsing
+  
+  for (int i = 0; i < elements.size(); i++) {
+    int[] el = elements.get(i);
+    Node n0 = nodes.get(el[0]); Node n1 = nodes.get(el[1]);
+    Node n2 = nodes.get(el[2]); Node n3 = nodes.get(el[3]);
+    Node n4 = nodes.get(el[4]); Node n5 = nodes.get(el[5]);
+    Node n6 = nodes.get(el[6]); Node n7 = nodes.get(el[7]);
+    
+    boolean isActive = (i == currentElement);
+    
+    // In highlight mode, make inactive elements wireframe/transparent
+    if (highlightMode && !isActive) {
+      noFill(); stroke(255, 30);
+      drawHexFaceSimple(n0, n1, n5, n4); drawHexFaceSimple(n3, n2, n6, n7);
+      drawHexFaceSimple(n0, n3, n7, n4); drawHexFaceSimple(n1, n2, n6, n5);
+      drawHexFaceSimple(n4, n5, n6, n7); drawHexFaceSimple(n0, n1, n2, n3);
+    } else {
+      stroke(0, 50);
+      drawHexFace(n0, n1, n5, n4, highlightMode ? blink : 1.0f); drawHexFace(n3, n2, n6, n7, highlightMode ? blink : 1.0f);
+      drawHexFace(n0, n3, n7, n4, highlightMode ? blink : 1.0f); drawHexFace(n1, n2, n6, n5, highlightMode ? blink : 1.0f);
+      drawHexFace(n4, n5, n6, n7, highlightMode ? blink : 1.0f); drawHexFace(n0, n1, n2, n3, highlightMode ? blink : 1.0f);
+    }
+  }
+  
+  // Mouse picking logic (only active in standard view)
+  if (!highlightMode && mousePressed && mouseY > 60) {
+    for (Node n : nodes) {
+      float defX = (float)(n.x + n.ux * warp_factor);
+      float defY = (float)(n.y + n.uy * warp_factor);
+      float defZ = (float)(n.z + n.uz * warp_factor);
+      float sx = screenX(defX, defY, defZ);
+      float sy = screenY(defX, defY, defZ);
+      if (dist(mouseX, mouseY, sx, sy) < closestDist) {
+        closestDist = dist(mouseX, mouseY, sx, sy);
+        selectedNode = n;
+      }
+    }
+  }
+  popMatrix();
+  
+  if (selectedNode != null && !highlightMode) {
+    hint(DISABLE_DEPTH_TEST); camera();
+    fill(255); rect(mouseX + 10, mouseY - 40, 220, 50, 5);
+    fill(0); textSize(14); textAlign(LEFT, TOP);
+    String val = showStress ? String.format("Stress: %.2f Pa", selectedNode.stress) : String.format("Disp Z: %.7f m", selectedNode.uz);
+    text(val, mouseX + 20, mouseY - 30);
+  }
+}
+
+// --- CORE MATHEMATICAL FEA ENGINE ---
+void runFEA() {
+  generateQuadraticMesh();
+  buildConstitutiveMatrix();
+  assembleGlobalSystem();
+  applyBoundaryConditions();
+  solveConjugateGradient();
+  calculateStresses();
+  
+  for(Node n : nodes) {
+    if ((float)n.uz < minDisp) minDisp = (float)n.uz;
+    if ((float)n.uz > maxDisp) maxDisp = (float)n.uz;
+    if ((float)n.stress < minStress) minStress = (float)n.stress;
+    if ((float)n.stress > maxStress) maxStress = (float)n.stress;
+  }
+  solved = true;
+}
+
+void buildConstitutiveMatrix() {
+  C = new double[6][6];
+  double f = E / ((1 + nu) * (1 - 2 * nu));
+  C[0][0] = f*(1-nu); C[0][1] = f*nu; C[0][2] = f*nu;
+  C[1][0] = f*nu; C[1][1] = f*(1-nu); C[1][2] = f*nu;
+  C[2][0] = f*nu; C[2][1] = f*nu; C[2][2] = f*(1-nu);
+  C[3][3] = f*(0.5-nu); C[4][4] = f*(0.5-nu); C[5][5] = f*(0.5-nu);
+}
+
+void assembleGlobalSystem() {
+  int numDofs = nodes.size() * 3;
+  Kg = new double[numDofs][numDofs];
+  F = new double[numDofs];
+  
+  double v = 1.0 / Math.sqrt(3.0);
+  double[][] ips = {{-v, 1}, {v, 1}};
+  
+  for (int[] el : elements) {
+    double[][] Kel = new double[60][60];
+    int[] dofs = new int[60];
+    for (int m = 0; m < 20; m++) {
+      dofs[m*3] = el[m]*3; dofs[m*3+1] = el[m]*3+1; dofs[m*3+2] = el[m]*3+2;
+    }
+    
+    for (int j=0; j<2; j++) {
+      double xi = ips[j][0], w1 = ips[j][1];
+      for (int k=0; k<2; k++) {
+        double eta = ips[k][0], w2 = ips[k][1];
+        for (int l=0; l<2; l++) {
+          double phi = ips[l][0], w3 = ips[l][1];
+          double w = w1 * w2 * w3;
+          
+          double[][] dN = get_dN(xi, eta, phi);
+          double[][] matjac = new double[3][3];
+          
+          for (int r=0; r<3; r++) {
+            for (int c=0; c<3; c++) {
+              for (int m=0; m<20; m++) {
+                double coord = (c==0) ? nodes.get(el[m]).x : (c==1) ? nodes.get(el[m]).y : nodes.get(el[m]).z;
+                matjac[r][c] += dN[r][m] * coord;
+              }
+            }
+          }
+          
+          double detJ = det3x3(matjac);
+          double[][] invJ = invert3x3(matjac);
+          double[][] dcoords = multiply(invJ, dN);
+          
+          double[][] B = new double[6][60];
+          for(int m=0; m<20; m++) {
+            B[0][m*3] = dcoords[0][m]; B[1][m*3+1] = dcoords[1][m]; B[2][m*3+2] = dcoords[2][m];
+            B[3][m*3] = dcoords[1][m]; B[3][m*3+1] = dcoords[0][m];
+            B[4][m*3+1] = dcoords[2][m]; B[4][m*3+2] = dcoords[1][m];
+            B[5][m*3] = dcoords[2][m]; B[5][m*3+2] = dcoords[0][m];
+          }
+          
+          double[][] BtC = multiplyMat(transpose(B), C);
+          double[][] BtCB = multiplyMat(BtC, B);
+          
+          for (int r=0; r<60; r++) {
+            for (int c=0; c<60; c++) {
+              Kel[r][c] += BtCB[r][c] * detJ * w;
+            }
+          }
+        }
+      }
+    }
+    
+    // Store localized element data for UI inspection
+    ElementData data = new ElementData();
+    data.nodes = el.clone();
+    data.dofs = dofs.clone();
+    data.Kel = new double[60][60];
+    for(int r=0; r<60; r++) System.arraycopy(Kel[r], 0, data.Kel[r], 0, 60);
+    elementDataList.add(data);
+    
+    // Map to global Matrix
+    for (int r=0; r<60; r++) {
+      for (int c=0; c<60; c++) {
+        Kg[dofs[r]][dofs[c]] += Kel[r][c];
+      }
+    }
+  }
+}
+
+void applyBoundaryConditions() {
+  ArrayList<Integer> loadNodes = new ArrayList<Integer>();
+  for (Node n : nodes) {
+    if (Math.abs(n.x - xmax) < 1e-6) loadNodes.add(n.id);
+  }
+  for (int nid : loadNodes) F[nid*3+2] = P / loadNodes.size();
+
+  for (Node n : nodes) {
+    if (n.x < 1e-6) {
+      int[] bcdofs = {n.id*3, n.id*3+1, n.id*3+2};
+      for (int d : bcdofs) {
+        for(int i=0; i<Kg.length; i++) { Kg[d][i] = 0; Kg[i][d] = 0; }
+        Kg[d][d] = 1.0;
+        F[d] = 0;
+      }
+    }
+  }
+}
+
+void solveConjugateGradient() {
+  int numDofs = F.length;
+  U = new double[numDofs];
+  double[] r = new double[numDofs];
+  double[] p = new double[numDofs];
+  
+  for(int i=0; i<numDofs; i++) { r[i] = F[i]; p[i] = r[i]; }
+  
+  double rsold = 0;
+  for(int i=0; i<numDofs; i++) rsold += r[i]*r[i];
+  
+  for(int iter=0; iter<numDofs*2; iter++) {
+    double[] Ap = new double[numDofs];
+    for(int i=0; i<numDofs; i++) {
+      for(int j=0; j<numDofs; j++) Ap[i] += Kg[i][j] * p[j];
+    }
+    
+    double pAp = 0;
+    for(int i=0; i<numDofs; i++) pAp += p[i]*Ap[i];
+    
+    double alpha = rsold / Math.max(pAp, 1e-16);
+    for(int i=0; i<numDofs; i++) {
+      U[i] += alpha * p[i];
+      r[i] -= alpha * Ap[i];
+    }
+    
+    double rsnew = 0;
+    for(int i=0; i<numDofs; i++) rsnew += r[i]*r[i];
+    
+    if(Math.sqrt(rsnew) < 1e-8) break;
+    
+    for(int i=0; i<numDofs; i++) p[i] = r[i] + (rsnew/rsold) * p[i];
+    rsold = rsnew;
+  }
+  
+  for(Node n : nodes) {
+    n.ux = U[n.id*3]; n.uy = U[n.id*3+1]; n.uz = U[n.id*3+2];
+  }
+}
+
+void calculateStresses() {
+  double v = 1.0 / Math.sqrt(3.0);
+  double[][] ips = {{-v, 1}, {v, 1}};
+  double[] nodal_stress_count = new double[nodes.size()];
+  
+  for (int[] el : elements) {
+    double[] udofs = new double[60];
+    for (int m=0; m<20; m++) {
+      udofs[m*3] = U[el[m]*3]; udofs[m*3+1] = U[el[m]*3+1]; udofs[m*3+2] = U[el[m]*3+2];
+    }
+    
+    for (int j=0; j<2; j++) {
+      double xi = ips[j][0], xip = 1.0/xi;
+      for (int k=0; k<2; k++) {
+        double eta = ips[k][0], etap = 1.0/eta;
+        for (int l=0; l<2; l++) {
+          double phi = ips[l][0], phip = 1.0/phi;
+          
+          double[][] dN = get_dN(xi, eta, phi);
+          double[][] matjac = new double[3][3];
+          for (int r=0; r<3; r++) {
+            for (int c=0; c<3; c++) {
+              for (int m=0; m<20; m++) {
+                double coord = (c==0) ? nodes.get(el[m]).x : (c==1) ? nodes.get(el[m]).y : nodes.get(el[m]).z;
+                matjac[r][c] += dN[r][m] * coord;
+              }
+            }
+          }
+          
+          double[][] invJ = invert3x3(matjac);
+          double[][] dcoords = multiply(invJ, dN);
+          double[][] B = new double[6][60];
+          for(int m=0; m<20; m++) {
+            B[0][m*3] = dcoords[0][m]; B[1][m*3+1] = dcoords[1][m]; B[2][m*3+2] = dcoords[2][m];
+            B[3][m*3] = dcoords[1][m]; B[3][m*3+1] = dcoords[0][m];
+            B[4][m*3+1] = dcoords[2][m]; B[4][m*3+2] = dcoords[1][m];
+            B[5][m*3] = dcoords[2][m]; B[5][m*3+2] = dcoords[0][m];
+          }
+          
+          double[] stress = new double[6];
+          for(int r=0; r<6; r++) {
+            for(int c=0; c<60; c++) {
+              for(int c2=0; c2<6; c2++) stress[r] += C[r][c2] * B[c2][c] * udofs[c];
+            }
+          }
+          
+          double[] Nvals = get_N_extrapolate(xip, etap, phip);
+          for(int m=0; m<20; m++) {
+            nodes.get(el[m]).stress += Nvals[m] * stress[0];
+            nodal_stress_count[el[m]] += Nvals[m];
+          }
+        }
+      }
+    }
+  }
+  for(Node n : nodes) if(nodal_stress_count[n.id] != 0) n.stress /= nodal_stress_count[n.id];
+}
+
+// MESH & MATH UTILITIES
+int addUniqueNode(double x, double y, double z) {
+  for (Node n : nodes) if (Math.abs(n.x-x)<1e-5 && Math.abs(n.y-y)<1e-5 && Math.abs(n.z-z)<1e-5) return n.id;
+  int id = nodes.size(); nodes.add(new Node(x, y, z, id)); return id;
+}
+
+void generateQuadraticMesh() {
+  double dx = 2.5, dy = 0.1, dz = 0.15;
+  int[] nIds = new int[nx*ny*nz];
+  int count = 0;
+  for(int i=0; i<nz; i++) {
+    for(int j=0; j<ny; j++) {
+      for(int k=0; k<nx; k++) {
+        nIds[count++] = addUniqueNode(xmin+k*dx, ymin+j*dy, zmin+i*dz);
+      }
+    }
+  }
+  
+  int[][] edgeMap = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
+  for(int i=0; i<nz-1; i++) {
+    for(int j=0; j<ny-1; j++) {
+      for(int k=0; k<nx-1; k++) {
+        int n0 = k+j*nx+i*nx*ny; int[] nds = {n0, n0+1, n0+1+nx, n0+nx, n0+nx*ny, n0+nx*ny+1, n0+nx*ny+1+nx, n0+nx*ny+nx};
+        int[] hex20 = new int[20];
+        for(int m=0; m<8; m++) hex20[m] = nIds[nds[m]];
+        for(int m=0; m<12; m++) {
+          Node p1 = nodes.get(nIds[nds[edgeMap[m][0]]]), p2 = nodes.get(nIds[nds[edgeMap[m][1]]]);
+          hex20[8+m] = addUniqueNode((p1.x+p2.x)/2.0, (p1.y+p2.y)/2.0, (p1.z+p2.z)/2.0);
+        }
+        elements.add(hex20);
+      }
+    }
+  }
+}
+
+// Full analytical shape functions
+double[][] get_dN(double xi, double eta, double phi) {
+  double[][] dN = new double[3][20];
+  dN[0][0] = eta*eta*phi/8.0 - eta*eta/8.0 + eta*phi*phi/8.0 + eta*phi*xi/4.0 - eta*phi/8.0 - eta*xi/4.0 - phi*phi/8.0 - phi*xi/4.0 + xi/4.0 + 1.0/8.0;
+  dN[0][1] = -eta*eta*phi/8.0 + eta*eta/8.0 - eta*phi*phi/8.0 + eta*phi*xi/4.0 + eta*phi/8.0 - eta*xi/4.0 + phi*phi/8.0 - phi*xi/4.0 + xi/4.0 - 1.0/8.0;
+  dN[0][2] = -eta*eta*phi/8.0 + eta*eta/8.0 + eta*phi*phi/8.0 - eta*phi*xi/4.0 - eta*phi/8.0 + eta*xi/4.0 + phi*phi/8.0 - phi*xi/4.0 + xi/4.0 - 1.0/8.0;
+  dN[0][3] = eta*eta*phi/8.0 - eta*eta/8.0 - eta*phi*phi/8.0 - eta*phi*xi/4.0 + eta*phi/8.0 + eta*xi/4.0 - phi*phi/8.0 - phi*xi/4.0 + xi/4.0 + 1.0/8.0;
+  dN[0][4] = -eta*eta*phi/8.0 - eta*eta/8.0 + eta*phi*phi/8.0 - eta*phi*xi/4.0 + eta*phi/8.0 - eta*xi/4.0 - phi*phi/8.0 + phi*xi/4.0 + xi/4.0 + 1.0/8.0;
+  dN[0][5] = eta*eta*phi/8.0 + eta*eta/8.0 - eta*phi*phi/8.0 - eta*phi*xi/4.0 - eta*phi/8.0 - eta*xi/4.0 + phi*phi/8.0 + phi*xi/4.0 + xi/4.0 - 1.0/8.0;
+  dN[0][6] = eta*eta*phi/8.0 + eta*eta/8.0 + eta*phi*phi/8.0 + eta*phi*xi/4.0 + eta*phi/8.0 + eta*xi/4.0 + phi*phi/8.0 + phi*xi/4.0 + xi/4.0 - 1.0/8.0;
+  dN[0][7] = -eta*eta*phi/8.0 - eta*eta/8.0 - eta*phi*phi/8.0 + eta*phi*xi/4.0 - eta*phi/8.0 + eta*xi/4.0 - phi*phi/8.0 + phi*xi/4.0 + xi/4.0 + 1.0/8.0;
+  dN[0][8] = -eta*phi*xi/2.0 + eta*xi/2.0 + phi*xi/2.0 - xi/2.0; dN[0][9] = eta*eta*phi/4.0 - eta*eta/4.0 - phi/4.0 + 1.0/4.0;
+  dN[0][10]= eta*phi*xi/2.0 - eta*xi/2.0 + phi*xi/2.0 - xi/2.0; dN[0][11]= -eta*eta*phi/4.0 + eta*eta/4.0 + phi/4.0 - 1.0/4.0;
+  dN[0][12]= eta*phi*xi/2.0 + eta*xi/2.0 - phi*xi/2.0 - xi/2.0; dN[0][13]= -eta*eta*phi/4.0 - eta*eta/4.0 + phi/4.0 + 1.0/4.0;
+  dN[0][14]= -eta*phi*xi/2.0 - eta*xi/2.0 - phi*xi/2.0 - xi/2.0; dN[0][15]= eta*eta*phi/4.0 + eta*eta/4.0 - phi/4.0 - 1.0/4.0;
+  dN[0][16]= -eta*phi*phi/4.0 + eta/4.0 + phi*phi/4.0 - 1.0/4.0; dN[0][17]= eta*phi*phi/4.0 - eta/4.0 - phi*phi/4.0 + 1.0/4.0;
+  dN[0][18]= -eta*phi*phi/4.0 + eta/4.0 - phi*phi/4.0 + 1.0/4.0; dN[0][19]= eta*phi*phi/4.0 - eta/4.0 + phi*phi/4.0 - 1.0/4.0;
+  
+  dN[1][0] = eta*phi*xi/4.0 - eta*phi/4.0 - eta*xi/4.0 + eta/4.0 + phi*phi*xi/8.0 - phi*phi/8.0 + phi*xi*xi/8.0 - phi*xi/8.0 - xi*xi/8.0 + 1.0/8.0;
+  dN[1][1] = -eta*phi*xi/4.0 - eta*phi/4.0 + eta*xi/4.0 + eta/4.0 - phi*phi*xi/8.0 - phi*phi/8.0 + phi*xi*xi/8.0 + phi*xi/8.0 - xi*xi/8.0 + 1.0/8.0;
+  dN[1][2] = -eta*phi*xi/4.0 - eta*phi/4.0 + eta*xi/4.0 + eta/4.0 + phi*phi*xi/8.0 + phi*phi/8.0 - phi*xi*xi/8.0 - phi*xi/8.0 + xi*xi/8.0 - 1.0/8.0;
+  dN[1][3] = eta*phi*xi/4.0 - eta*phi/4.0 - eta*xi/4.0 + eta/4.0 - phi*phi*xi/8.0 + phi*phi/8.0 - phi*xi*xi/8.0 + phi*xi/8.0 + xi*xi/8.0 - 1.0/8.0;
+  dN[1][4] = -eta*phi*xi/4.0 + eta*phi/4.0 - eta*xi/4.0 + eta/4.0 + phi*phi*xi/8.0 - phi*phi/8.0 - phi*xi*xi/8.0 + phi*xi/8.0 - xi*xi/8.0 + 1.0/8.0;
+  dN[1][5] = eta*phi*xi/4.0 + eta*phi/4.0 + eta*xi/4.0 + eta/4.0 - phi*phi*xi/8.0 - phi*phi/8.0 - phi*xi*xi/8.0 - phi*xi/8.0 - xi*xi/8.0 + 1.0/8.0;
+  dN[1][6] = eta*phi*xi/4.0 + eta*phi/4.0 + eta*xi/4.0 + eta/4.0 + phi*phi*xi/8.0 + phi*phi/8.0 + phi*xi*xi/8.0 + phi*xi/8.0 + xi*xi/8.0 - 1.0/8.0;
+  dN[1][7] = -eta*phi*xi/4.0 + eta*phi/4.0 - eta*xi/4.0 + eta/4.0 - phi*phi*xi/8.0 + phi*phi/8.0 + phi*xi*xi/8.0 - phi*xi/8.0 + xi*xi/8.0 - 1.0/8.0;
+  dN[1][8] = -phi*xi*xi/4.0 + phi/4.0 + xi*xi/4.0 - 1.0/4.0; dN[1][9] = eta*phi*xi/2.0 + eta*phi/2.0 - eta*xi/2.0 - eta/2.0;
+  dN[1][10]= phi*xi*xi/4.0 - phi/4.0 - xi*xi/4.0 + 1.0/4.0; dN[1][11]= -eta*phi*xi/2.0 + eta*phi/2.0 + eta*xi/2.0 - eta/2.0;
+  dN[1][12]= phi*xi*xi/4.0 - phi/4.0 + xi*xi/4.0 - 1.0/4.0; dN[1][13]= -eta*phi*xi/2.0 - eta*phi/2.0 - eta*xi/2.0 - eta/2.0;
+  dN[1][14]= -phi*xi*xi/4.0 + phi/4.0 - xi*xi/4.0 + 1.0/4.0; dN[1][15]= eta*phi*xi/2.0 - eta*phi/2.0 + eta*xi/2.0 - eta/2.0;
+  dN[1][16]= -phi*phi*xi/4.0 + phi*phi/4.0 + xi/4.0 - 1.0/4.0; dN[1][17]= phi*phi*xi/4.0 + phi*phi/4.0 - xi/4.0 - 1.0/4.0;
+  dN[1][18]= -phi*phi*xi/4.0 - phi*phi/4.0 + xi/4.0 + 1.0/4.0; dN[1][19]= phi*phi*xi/4.0 - phi*phi/4.0 - xi/4.0 + 1.0/4.0;
+  
+  dN[2][0] = eta*eta*xi/8.0 - eta*eta/8.0 + eta*phi*xi/4.0 - eta*phi/4.0 + eta*xi*xi/8.0 - eta*xi/8.0 - phi*xi/4.0 + phi/4.0 - xi*xi/8.0 + 1.0/8.0;
+  dN[2][1] = -eta*eta*xi/8.0 - eta*eta/8.0 - eta*phi*xi/4.0 - eta*phi/4.0 + eta*xi*xi/8.0 + eta*xi/8.0 + phi*xi/4.0 + phi/4.0 - xi*xi/8.0 + 1.0/8.0;
+  dN[2][2] = -eta*eta*xi/8.0 - eta*eta/8.0 + eta*phi*xi/4.0 + eta*phi/4.0 - eta*xi*xi/8.0 - eta*xi/8.0 + phi*xi/4.0 + phi/4.0 - xi*xi/8.0 + 1.0/8.0;
+  dN[2][3] = eta*eta*xi/8.0 - eta*eta/8.0 - eta*phi*xi/4.0 + eta*phi/4.0 - eta*xi*xi/8.0 + eta*xi/8.0 - phi*xi/4.0 + phi/4.0 - xi*xi/8.0 + 1.0/8.0;
+  dN[2][4] = -eta*eta*xi/8.0 + eta*eta/8.0 + eta*phi*xi/4.0 - eta*phi/4.0 - eta*xi*xi/8.0 + eta*xi/8.0 - phi*xi/4.0 + phi/4.0 + xi*xi/8.0 - 1.0/8.0;
+  dN[2][5] = eta*eta*xi/8.0 + eta*eta/8.0 - eta*phi*xi/4.0 - eta*phi/4.0 - eta*xi*xi/8.0 - eta*xi/8.0 + phi*xi/4.0 + phi/4.0 + xi*xi/8.0 - 1.0/8.0;
+  dN[2][6] = eta*eta*xi/8.0 + eta*eta/8.0 + eta*phi*xi/4.0 + eta*phi/4.0 + eta*xi*xi/8.0 + eta*xi/8.0 + phi*xi/4.0 + phi/4.0 + xi*xi/8.0 - 1.0/8.0;
+  dN[2][7] = -eta*eta*xi/8.0 + eta*eta/8.0 - eta*phi*xi/4.0 + eta*phi/4.0 + eta*xi*xi/8.0 - eta*xi/8.0 - phi*xi/4.0 + phi/4.0 + xi*xi/8.0 - 1.0/8.0;
+  dN[2][8] = -eta*xi*xi/4.0 + eta/4.0 + xi*xi/4.0 - 1.0/4.0; dN[2][9] = eta*eta*xi/4.0 + eta*eta/4.0 - xi/4.0 - 1.0/4.0;
+  dN[2][10]= eta*xi*xi/4.0 - eta/4.0 + xi*xi/4.0 - 1.0/4.0; dN[2][11]= -eta*eta*xi/4.0 + eta*eta/4.0 + xi/4.0 - 1.0/4.0;
+  dN[2][12]= eta*xi*xi/4.0 - eta/4.0 - xi*xi/4.0 + 1.0/4.0; dN[2][13]= -eta*eta*xi/4.0 - eta*eta/4.0 + xi/4.0 + 1.0/4.0;
+  dN[2][14]= -eta*xi*xi/4.0 + eta/4.0 - xi*xi/4.0 + 1.0/4.0; dN[2][15]= eta*eta*xi/4.0 - eta*eta/4.0 - xi/4.0 + 1.0/4.0;
+  dN[2][16]= -eta*phi*xi/2.0 + eta*phi/2.0 + phi*xi/2.0 - phi/2.0; dN[2][17]= eta*phi*xi/2.0 + eta*phi/2.0 - phi*xi/2.0 - phi/2.0;
+  dN[2][18]= -eta*phi*xi/2.0 - eta*phi/2.0 - phi*xi/2.0 - phi/2.0; dN[2][19]= eta*phi*xi/2.0 - eta*phi/2.0 + phi*xi/2.0 - phi/2.0;
+  return dN;
+}
+
+double[] get_N_extrapolate(double xip, double etap, double phip) {
+  double[] N = new double[20];
+  N[0] = etap*etap*phip*xip/8.0 - etap*etap*phip/8.0 - etap*etap*xip/8.0 + etap*etap/8.0 + etap*phip*phip*xip/8.0 - etap*phip*phip/8.0 + etap*phip*xip*xip/8.0 - etap*phip*xip/8.0 - etap*xip*xip/8.0 + etap/8.0 - phip*phip*xip/8.0 + phip*phip/8.0 - phip*xip*xip/8.0 + phip/8.0 + xip*xip/8.0 + xip/8.0 - 1.0/4.0;
+  N[1] = -etap*etap*phip*xip/8.0 - etap*etap*phip/8.0 + etap*etap*xip/8.0 + etap*etap/8.0 - etap*phip*phip*xip/8.0 - etap*phip*phip/8.0 + etap*phip*xip*xip/8.0 + etap*phip*xip/8.0 - etap*xip*xip/8.0 + etap/8.0 + phip*phip*xip/8.0 + phip*phip/8.0 - phip*xip*xip/8.0 + phip/8.0 + xip*xip/8.0 - xip/8.0 - 1.0/4.0;
+  N[2] = -etap*etap*phip*xip/8.0 - etap*etap*phip/8.0 + etap*etap*xip/8.0 + etap*etap/8.0 + etap*phip*phip*xip/8.0 + etap*phip*phip/8.0 - etap*phip*xip*xip/8.0 - etap*phip*xip/8.0 + etap*xip*xip/8.0 - etap/8.0 + phip*phip*xip/8.0 + phip*phip/8.0 - phip*xip*xip/8.0 + phip/8.0 + xip*xip/8.0 - xip/8.0 - 1.0/4.0;
+  N[3] = etap*etap*phip*xip/8.0 - etap*etap*phip/8.0 - etap*etap*xip/8.0 + etap*etap/8.0 - etap*phip*phip*xip/8.0 + etap*phip*phip/8.0 - etap*phip*xip*xip/8.0 + etap*phip*xip/8.0 + etap*xip*xip/8.0 - etap/8.0 - phip*phip*xip/8.0 + phip*phip/8.0 - phip*xip*xip/8.0 + phip/8.0 + xip*xip/8.0 + xip/8.0 - 1.0/4.0;
+  N[4] = -etap*etap*phip*xip/8.0 + etap*etap*phip/8.0 - etap*etap*xip/8.0 + etap*etap/8.0 + etap*phip*phip*xip/8.0 - etap*phip*phip/8.0 - etap*phip*xip*xip/8.0 + etap*phip*xip/8.0 - etap*xip*xip/8.0 + etap/8.0 - phip*phip*xip/8.0 + phip*phip/8.0 + phip*xip*xip/8.0 - phip/8.0 + xip*xip/8.0 + xip/8.0 - 1.0/4.0;
+  N[5] = etap*etap*phip*xip/8.0 + etap*etap*phip/8.0 + etap*etap*xip/8.0 + etap*etap/8.0 - etap*phip*phip*xip/8.0 - etap*phip*phip/8.0 - etap*phip*xip*xip/8.0 - etap*phip*xip/8.0 - etap*xip*xip/8.0 + etap/8.0 + phip*phip*xip/8.0 + phip*phip/8.0 + phip*xip*xip/8.0 - phip/8.0 + xip*xip/8.0 - xip/8.0 - 1.0/4.0;
+  N[6] = etap*etap*phip*xip/8.0 + etap*etap*phip/8.0 + etap*etap*xip/8.0 + etap*etap/8.0 + etap*phip*phip*xip/8.0 + etap*phip*phip/8.0 + etap*phip*xip*xip/8.0 + etap*phip*xip/8.0 + etap*xip*xip/8.0 - etap/8.0 + phip*phip*xip/8.0 + phip*phip/8.0 + phip*xip*xip/8.0 - phip/8.0 + xip*xip/8.0 - xip/8.0 - 1.0/4.0;
+  N[7] = -etap*etap*phip*xip/8.0 + etap*etap*phip/8.0 - etap*etap*xip/8.0 + etap*etap/8.0 - etap*phip*phip*xip/8.0 + etap*phip*phip/8.0 + etap*phip*xip*xip/8.0 - etap*phip*xip/8.0 + etap*xip*xip/8.0 - etap/8.0 - phip*phip*xip/8.0 + phip*phip/8.0 + phip*xip*xip/8.0 - phip/8.0 + xip*xip/8.0 + xip/8.0 - 1.0/4.0;
+  N[8] = -etap*phip*xip*xip/4.0 + etap*phip/4.0 + etap*xip*xip/4.0 - etap/4.0 + phip*xip*xip/4.0 - phip/4.0 - xip*xip/4.0 + 1.0/4.0;
+  N[9] = etap*etap*phip*xip/4.0 + etap*etap*phip/4.0 - etap*etap*xip/4.0 - etap*etap/4.0 - phip*xip/4.0 - phip/4.0 + xip/4.0 + 1.0/4.0;
+  N[10]= etap*phip*xip*xip/4.0 - etap*phip/4.0 - etap*xip*xip/4.0 + etap/4.0 + phip*xip*xip/4.0 - phip/4.0 - xip*xip/4.0 + 1.0/4.0;
+  N[11]= -etap*etap*phip*xip/4.0 + etap*etap*phip/4.0 + etap*etap*xip/4.0 - etap*etap/4.0 + phip*xip/4.0 - phip/4.0 - xip/4.0 + 1.0/4.0;
+  N[12]= etap*phip*xip*xip/4.0 - etap*phip/4.0 + etap*xip*xip/4.0 - etap/4.0 - phip*xip*xip/4.0 + phip/4.0 - xip*xip/4.0 + 1.0/4.0;
+  N[13]= -etap*etap*phip*xip/4.0 - etap*etap*phip/4.0 - etap*etap*xip/4.0 - etap*etap/4.0 + phip*xip/4.0 + phip/4.0 + xip/4.0 + 1.0/4.0;
+  N[14]= -etap*phip*xip*xip/4.0 + etap*phip/4.0 - etap*xip*xip/4.0 + etap/4.0 - phip*xip*xip/4.0 + phip/4.0 - xip*xip/4.0 + 1.0/4.0;
+  N[15]= etap*etap*phip*xip/4.0 - etap*etap*phip/4.0 + etap*etap*xip/4.0 - etap*etap/4.0 - phip*xip/4.0 + phip/4.0 - xip/4.0 + 1.0/4.0;
+  N[16]= -etap*phip*phip*xip/4.0 + etap*phip*phip/4.0 + etap*xip/4.0 - etap/4.0 + phip*phip*xip/4.0 - phip*phip/4.0 - xip/4.0 + 1.0/4.0;
+  N[17]= etap*phip*phip*xip/4.0 + etap*phip*phip/4.0 - etap*xip/4.0 - etap/4.0 - phip*phip*xip/4.0 - phip*phip/4.0 + xip/4.0 + 1.0/4.0;
+  N[18]= -etap*phip*phip*xip/4.0 - etap*phip*phip/4.0 + etap*xip/4.0 + etap/4.0 - phip*phip*xip/4.0 - phip*phip/4.0 + xip/4.0 + 1.0/4.0;
+  N[19]= etap*phip*phip*xip/4.0 - etap*phip*phip/4.0 - etap*xip/4.0 + etap/4.0 + phip*phip*xip/4.0 - phip*phip/4.0 - xip/4.0 + 1.0/4.0;
+  return N;
+}
+
+double det3x3(double[][] A) {
+  return A[0][0]*(A[1][1]*A[2][2]-A[1][2]*A[2][1]) - A[0][1]*(A[1][0]*A[2][2]-A[1][2]*A[2][0]) + A[0][2]*(A[1][0]*A[2][1]-A[1][1]*A[2][0]);
+}
+
+double[][] invert3x3(double[][] A) {
+  double det = det3x3(A), invd = 1.0/det;
+  double[][] inv = new double[3][3];
+  inv[0][0] = (A[1][1]*A[2][2]-A[2][1]*A[1][2])*invd; inv[0][1] = (A[0][2]*A[2][1]-A[0][1]*A[2][2])*invd; inv[0][2] = (A[0][1]*A[1][2]-A[0][2]*A[1][1])*invd;
+  inv[1][0] = (A[1][2]*A[2][0]-A[1][0]*A[2][2])*invd; inv[1][1] = (A[0][0]*A[2][2]-A[0][2]*A[2][0])*invd; inv[1][2] = (A[1][0]*A[0][2]-A[0][0]*A[1][2])*invd;
+  inv[2][0] = (A[1][0]*A[2][1]-A[2][0]*A[1][1])*invd; inv[2][1] = (A[2][0]*A[0][1]-A[0][0]*A[2][1])*invd; inv[2][2] = (A[0][0]*A[1][1]-A[1][0]*A[0][1])*invd;
+  return inv;
+}
+
+double[][] multiply(double[][] A, double[][] B) {
+  double[][] C = new double[3][20];
+  for(int i=0; i<3; i++) for(int j=0; j<20; j++) for(int k=0; k<3; k++) C[i][j] += A[i][k] * B[k][j];
+  return C;
+}
+
+double[][] multiplyMat(double[][] A, double[][] B) {
+  int aR = A.length, aC = A[0].length, bC = B[0].length;
+  double[][] C = new double[aR][bC];
+  for(int i=0; i<aR; i++) for(int j=0; j<bC; j++) for(int k=0; k<aC; k++) C[i][j] += A[i][k] * B[k][j];
+  return C;
+}
+
+double[][] transpose(double[][] B) {
+  double[][] Bt = new double[60][6];
+  for(int i=0; i<6; i++) for(int j=0; j<60; j++) Bt[j][i] = B[i][j];
+  return Bt;
+}
+
+// UI RENDERING UTILITIES
+void drawHexFace(Node a, Node b, Node c, Node d, float alphaMult) {
+  beginShape(QUADS);
+  applyColor(a, alphaMult); vertex((float)(a.x + a.ux*warp_factor), (float)(a.y + a.uy*warp_factor), (float)(a.z + a.uz*warp_factor));
+  applyColor(b, alphaMult); vertex((float)(b.x + b.ux*warp_factor), (float)(b.y + b.uy*warp_factor), (float)(b.z + b.uz*warp_factor));
+  applyColor(c, alphaMult); vertex((float)(c.x + c.ux*warp_factor), (float)(c.y + c.uy*warp_factor), (float)(c.z + c.uz*warp_factor));
+  applyColor(d, alphaMult); vertex((float)(d.x + d.ux*warp_factor), (float)(d.y + d.uy*warp_factor), (float)(d.z + d.uz*warp_factor));
+  endShape();
+}
+
+void drawHexFaceSimple(Node a, Node b, Node c, Node d) {
+  beginShape(QUADS);
+  vertex((float)(a.x + a.ux*warp_factor), (float)(a.y + a.uy*warp_factor), (float)(a.z + a.uz*warp_factor));
+  vertex((float)(b.x + b.ux*warp_factor), (float)(b.y + b.uy*warp_factor), (float)(b.z + b.uz*warp_factor));
+  vertex((float)(c.x + c.ux*warp_factor), (float)(c.y + c.uy*warp_factor), (float)(c.z + c.uz*warp_factor));
+  vertex((float)(d.x + d.ux*warp_factor), (float)(d.y + d.uy*warp_factor), (float)(d.z + d.uz*warp_factor));
+  endShape();
+}
+
+void applyColor(Node n, float alphaMult) {
+  float val = showStress ? (float)n.stress : (float)n.uz;
+  float vmin = showStress ? minStress : minDisp;
+  float vmax = showStress ? maxStress : maxDisp;
+  
+  float dv = vmax - vmin; if (dv == 0) { fill(255, 255 * alphaMult); return; }
+  float norm = (val - vmin) / dv;
+  float r = constrain(1.5f - abs(norm * 4 - 3), 0, 1);
+  float g = constrain(1.5f - abs(norm * 4 - 2), 0, 1);
+  float b = constrain(1.5f - abs(norm * 4 - 1), 0, 1);
+  fill(r * 255, g * 255, b * 255, 255 * alphaMult);
+}
+
+void drawScale() {
+  int barW = 40, barH = height - 300, startX = width - 80, startY = 160;
+  float vmin = showStress ? minStress : minDisp, vmax = showStress ? maxStress : maxDisp;
+  for (int i = 0; i <= barH; i++) {
+    float norm = 1.0f - (float)i / barH;
+    float r = constrain(1.5f - abs(norm * 4 - 3), 0, 1), g = constrain(1.5f - abs(norm * 4 - 2), 0, 1), b = constrain(1.5f - abs(norm * 4 - 1), 0, 1);
+    stroke(r * 255, g * 255, b * 255); line(startX, startY + i, startX + barW, startY + i);
+  }
+  fill(255); textSize(24); textAlign(LEFT, CENTER);
+  text(String.format("%.2e", vmax), startX + barW + 10, startY);
+  text(String.format("%.2e", vmin), startX + barW + 10, startY + barH);
+  text(showStress ? "Sigma 11 (Pa)" : "Disp Z (m)", startX - 40, startY - 40);
+}
+
+void drawInstructions() {
+  fill(255); textSize(24); textAlign(LEFT, TOP);
+  text("1. Drag to rotate 3D view", 30, 80);
+  text("2. Tap and hold beam to tag values", 30, 120);
+  text("3. Tap here to toggle: " + (showStress ? "STRESS" : "DISPLACEMENT"), 30, 160);
+}
+
+class Node {
+  double x, y, z; int id;
+  double ux = 0, uy = 0, uz = 0, stress = 0;
+  Node(double x, double y, double z, int id) { this.x = x; this.y = y; this.z = z; this.id = id; }
+}
